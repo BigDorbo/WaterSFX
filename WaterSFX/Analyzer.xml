@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Analyzer>
+  <WaterSFX>
+    <Types>
+      <li>WaterSFX.MapComponent_WaterSFX</li>
+    </Types>
+  </WaterSFX>
+</Analyzer>

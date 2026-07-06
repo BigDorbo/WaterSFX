@@ -1,0 +1,5 @@
+C:\Program Files (x86)\Steam\steamapps\common\RimWorld\Mods\WaterSFX\Assemblies\WaterSFX.dll
+C:\Program Files (x86)\Steam\steamapps\common\RimWorld\Mods\WaterSFX\Source\WaterSFX\obj\Release\WaterSFX.csproj.AssemblyReference.cache
+C:\Program Files (x86)\Steam\steamapps\common\RimWorld\Mods\WaterSFX\Source\WaterSFX\obj\Release\WaterSFX.GeneratedMSBuildEditorConfig.editorconfig
+C:\Program Files (x86)\Steam\steamapps\common\RimWorld\Mods\WaterSFX\Source\WaterSFX\obj\Release\WaterSFX.csproj.CoreCompileInputs.cache
+C:\Program Files (x86)\Steam\steamapps\common\RimWorld\Mods\WaterSFX\Source\WaterSFX\obj\Release\WaterSFX.dll
