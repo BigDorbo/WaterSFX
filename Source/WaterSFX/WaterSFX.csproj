@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net472</TargetFramework>
+    <AssemblyName>WaterSFX</AssemblyName>
+    <RootNamespace>WaterSFX</RootNamespace>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <DebugType>none</DebugType>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <CopyLocalLockFileAssemblies>false</CopyLocalLockFileAssemblies>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <OutputPath>..\..\Assemblies\</OutputPath>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Krafs.Rimworld.Ref" Version="1.6.*" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="WaterSFX.cs" />
+  </ItemGroup>
+
+</Project>
