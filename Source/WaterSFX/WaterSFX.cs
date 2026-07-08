@@ -11,17 +11,23 @@ namespace WaterSFX
     {
         public bool silenceUnderMusic;
         public bool disableDucking;
+        public bool silenceUnderMusicLava;
+        public bool disableDuckingLava;
 
         public override void ExposeData()
         {
             Scribe_Values.Look<bool>(ref this.silenceUnderMusic, "silenceUnderMusic", false, false);
             Scribe_Values.Look<bool>(ref this.disableDucking, "disableDucking", false, false);
+            Scribe_Values.Look<bool>(ref this.silenceUnderMusicLava, "silenceUnderMusicLava", false, false);
+            Scribe_Values.Look<bool>(ref this.disableDuckingLava, "disableDuckingLava", false, false);
         }
     }
 
     public class WaterSFXMod : Mod
     {
         public static WaterSFXSettings Settings;
+
+        private static readonly Color NoteColor = new Color32(73, 214, 183, 255);
 
         public WaterSFXMod(ModContentPack content) : base(content)
         {
@@ -32,24 +38,41 @@ namespace WaterSFX
         {
             Listing_Standard listing = new Listing_Standard();
             listing.Begin(inRect);
+            Color prevColor = GUI.color;
+            GUI.color = NoteColor;
+            listing.Label("If no options are checked the mod will automatically reduce, but not disable, its effects during music tracks.");
+            GUI.color = prevColor;
+            listing.Gap(6f);
             bool wasSilence = Settings.silenceUnderMusic;
-            listing.CheckboxLabeled("Silence Water While Music Plays", ref Settings.silenceUnderMusic, "Silences the water when music is playing, like other ambience in the game.", 0f, 1f);
+            listing.CheckboxLabeled("Silence Water While Music Plays", ref Settings.silenceUnderMusic, null, 0f, 1f);
             if (Settings.silenceUnderMusic && !wasSilence)
             {
                 Settings.disableDucking = false;
             }
             bool wasDisable = Settings.disableDucking;
-            listing.CheckboxLabeled("Disable Music Ducking", ref Settings.disableDucking, "Keeps the water at full volume even while music is playing.", 0f, 1f);
+            listing.CheckboxLabeled("Disable Audio Ducking For Water", ref Settings.disableDucking, null, 0f, 1f);
             if (Settings.disableDucking && !wasDisable)
             {
                 Settings.silenceUnderMusic = false;
+            }
+            bool wasSilenceLava = Settings.silenceUnderMusicLava;
+            listing.CheckboxLabeled("Silence Lava While Music Plays", ref Settings.silenceUnderMusicLava, null, 0f, 1f);
+            if (Settings.silenceUnderMusicLava && !wasSilenceLava)
+            {
+                Settings.disableDuckingLava = false;
+            }
+            bool wasDisableLava = Settings.disableDuckingLava;
+            listing.CheckboxLabeled("Disable Audio Ducking For Lava", ref Settings.disableDuckingLava, null, 0f, 1f);
+            if (Settings.disableDuckingLava && !wasDisableLava)
+            {
+                Settings.silenceUnderMusicLava = false;
             }
             listing.End();
         }
 
         public override string SettingsCategory()
         {
-            return "WaterSFX";
+            return "LiquidSFX";
         }
     }
 
@@ -59,37 +82,46 @@ namespace WaterSFX
         private const int River = 2;
         private const int Still = 3;
         private const int Marsh = 4;
-        private const int CategoryCount = 5;
-        private const int Radius = 24;
+        private const int Lava = 5;
+        private const int CategoryCount = 6;
+        private const int Radius = 18;
         private const int MinBodyTiles = 10;
+        private const int ThrottleFrames = 6;
+        private const int RescanTicks = 250;
         private const float InvRadius = 1f / Radius;
+        private const float SmoothSpeed = 10f;
         private const float ZoomFull = 0.25f;
         private const float ZoomMute = 0.8f;
         private const float MusicDuckFloor = 0.3f;
-        private const float MusicRampSpeed = 0.8f;
         private const float MusicAudibleFloor = 0.001f;
 
-        private static readonly string[] SoundByCategory = new string[] { null, "WaterSFX_Coast", "WaterSFX_River", "WaterSFX_Still", "WaterSFX_Marsh" };
+        private static readonly string[] SoundByCategory = new string[] { null, "WaterSFX_Coast", "WaterSFX_River", "WaterSFX_Still", "WaterSFX_Marsh", "WaterSFX_Lava_Still" };
 
         private static byte[] categoryByTerrain;
+        private static byte[] overrideByTerrain;
 
-        private byte[][] fields;
-        private byte[] lastProximity;
+        private byte[] staticType;
+        private byte[] waterType;
+        private float[] lastProximity;
+        private int[] bestDist;
+        private float[] targetVol;
+        private float[] curVol;
         private SoundDef[] sounds;
         private Sustainer[] sustainers;
         private CameraDriver camera;
         private MusicManagerPlay musicManager;
-        private float musicRamp;
-        private int activeCount;
         private int mapWidth;
         private int mapHeight;
         private float zoomMin;
         private float zoomSpan;
         private bool zoomReady;
+        private int lastUpdateFrame;
         private int lastX;
         private int lastZ;
-        private float lastGain;
         private bool haveLast;
+        private bool scanDirty;
+        private int nextRescanTick;
+        private bool subscribed;
         private bool built;
         private bool ready;
 
@@ -102,6 +134,16 @@ namespace WaterSFX
             LongEventHandler.ExecuteWhenFinished(new Action(this.Build));
         }
 
+        public override void MapRemoved()
+        {
+            if (this.subscribed)
+            {
+                this.map.events.TerrainChanged -= this.OnTerrainChanged;
+                this.subscribed = false;
+            }
+            this.EndSustainers();
+        }
+
         public override void MapComponentUpdate()
         {
             if (!this.ready)
@@ -110,6 +152,7 @@ namespace WaterSFX
             }
             if (this.map != Find.CurrentMap)
             {
+                this.EndSustainers();
                 this.haveLast = false;
                 return;
             }
@@ -135,72 +178,131 @@ namespace WaterSFX
 
             if (Find.TickManager.Paused)
             {
-                this.MaintainActive();
                 return;
             }
 
-            IntVec3 cell = cam.MapPosition;
-            float music = this.MusicFactor();
-            float gain = this.ZoomFactor(cam.RootSize) * music;
-
-            if (this.haveLast && cell.x == this.lastX && cell.z == this.lastZ && gain == this.lastGain)
+            int frame = Time.frameCount;
+            if (frame - this.lastUpdateFrame >= ThrottleFrames)
             {
-                this.MaintainActive();
-                return;
+                this.lastUpdateFrame = frame;
+                this.UpdateTargets(cam);
             }
 
+            this.ApplyVolumes();
+        }
+
+        private void UpdateTargets(CameraDriver cam)
+        {
+            IntVec3 cell = cam.MapPosition;
             if (cell.x < 0 || cell.x >= this.mapWidth || cell.z < 0 || cell.z >= this.mapHeight)
             {
-                this.MaintainActive();
+                for (int c = 1; c < CategoryCount; c++)
+                {
+                    this.targetVol[c] = 0f;
+                }
+                this.haveLast = false;
                 return;
             }
 
-            int index = cell.z * this.mapWidth + cell.x;
-
-            if (this.haveLast && gain == this.lastGain && this.ProximityUnchanged(index))
+            int tick = Find.TickManager.TicksGame;
+            if (!this.haveLast || cell.x != this.lastX || cell.z != this.lastZ || this.scanDirty || tick >= this.nextRescanTick)
             {
+                this.Scan(cell.x, cell.z);
                 this.lastX = cell.x;
                 this.lastZ = cell.z;
-                this.MaintainActive();
-                return;
+                this.haveLast = true;
+                this.scanDirty = false;
+                this.nextRescanTick = tick + RescanTicks;
             }
 
-            float step = gain * InvRadius;
-            for (int a = 0; a < this.activeCount; a++)
+            float zoom = this.ZoomFactor(cam.RootSize);
+            float waterStep = zoom * this.MusicFactor(false) * InvRadius;
+            float lavaStep = zoom * this.MusicFactor(true) * InvRadius;
+            for (int c = 1; c < CategoryCount; c++)
             {
-                byte proximity = this.fields[a][index];
-                this.lastProximity[a] = proximity;
-                Sustainer sustainer = this.sustainers[a];
-                if (sustainer == null || sustainer.Ended)
+                if (this.sounds[c] == null)
                 {
-                    sustainer = this.sounds[a].TrySpawnSustainer(SoundInfo.OnCamera(MaintenanceType.PerFrame));
-                    this.sustainers[a] = sustainer;
+                    continue;
                 }
-                if (sustainer != null)
-                {
-                    sustainer.Maintain();
-                    sustainer.externalParams["Vol"] = proximity * step;
-                }
+                float step = (c == Lava) ? lavaStep : waterStep;
+                this.targetVol[c] = this.lastProximity[c] * step;
             }
-            this.lastX = cell.x;
-            this.lastZ = cell.z;
-            this.lastGain = gain;
-            this.haveLast = true;
         }
 
-        private bool ProximityUnchanged(int index)
+        private void Scan(int camX, int camZ)
         {
-            for (int a = 0; a < this.activeCount; a++)
+            int[] best = this.bestDist;
+            for (int c = 1; c < CategoryCount; c++)
             {
-                if (this.fields[a][index] != this.lastProximity[a])
+                best[c] = Radius;
+            }
+
+            int w = this.mapWidth;
+            int minX = camX - Radius;
+            if (minX < 0)
+            {
+                minX = 0;
+            }
+            int maxX = camX + Radius;
+            if (maxX > w - 1)
+            {
+                maxX = w - 1;
+            }
+            int minZ = camZ - Radius;
+            if (minZ < 0)
+            {
+                minZ = 0;
+            }
+            int maxZ = camZ + Radius;
+            if (maxZ > this.mapHeight - 1)
+            {
+                maxZ = this.mapHeight - 1;
+            }
+
+            byte[] types = this.waterType;
+            byte[] table = categoryByTerrain;
+            TerrainGrid grid = this.map.terrainGrid;
+
+            for (int z = minZ; z <= maxZ; z++)
+            {
+                int dz = z - camZ;
+                if (dz < 0)
                 {
-                    return false;
+                    dz = -dz;
+                }
+                int row = z * w;
+                for (int x = minX; x <= maxX; x++)
+                {
+                    int i = row + x;
+                    byte cat = types[i];
+                    if (cat == 0)
+                    {
+                        continue;
+                    }
+                    int dx = x - camX;
+                    if (dx < 0)
+                    {
+                        dx = -dx;
+                    }
+                    int d = (dx > dz) ? dx : dz;
+                    if (d >= best[cat])
+                    {
+                        continue;
+                    }
+                    if (table[grid.TerrainAt(i).index] != 0)
+                    {
+                        best[cat] = d;
+                    }
                 }
             }
-            return true;
+
+            for (int c = 1; c < CategoryCount; c++)
+            {
+                this.lastProximity[c] = (float)(Radius - best[c]);
+            }
         }
 
-        private float MusicFactor()
+        private float MusicFactor(bool lava)
         {
             MusicManagerPlay music = this.musicManager;
             if (music == null)
@@ -212,52 +314,85 @@ namespace WaterSFX
                 }
                 this.musicManager = music;
             }
-            float target = (music.IsPlaying && music.CurSanitizedVolume > MusicAudibleFloor) ? 1f : 0f;
-            float delta = MusicRampSpeed * Time.deltaTime;
-            if (this.musicRamp < target)
-            {
-                this.musicRamp += delta;
-                if (this.musicRamp > target)
-                {
-                    this.musicRamp = target;
-                }
-            }
-            else if (this.musicRamp > target)
-            {
-                this.musicRamp -= delta;
-                if (this.musicRamp < target)
-                {
-                    this.musicRamp = target;
-                }
-            }
-            if (this.musicRamp <= 0f)
+            if (!(music.IsPlaying && music.CurSanitizedVolume > MusicAudibleFloor))
             {
                 return 1f;
             }
             WaterSFXSettings settings = WaterSFXMod.Settings;
-            if (settings != null && settings.disableDucking)
+            if (settings == null)
+            {
+                return MusicDuckFloor;
+            }
+            bool disable = lava ? settings.disableDuckingLava : settings.disableDucking;
+            if (disable)
             {
                 return 1f;
             }
-            float floor = (settings != null && settings.silenceUnderMusic) ? 0f : MusicDuckFloor;
-            return 1f - this.musicRamp * (1f - floor);
+            bool silence = lava ? settings.silenceUnderMusicLava : settings.silenceUnderMusic;
+            return silence ? 0f : MusicDuckFloor;
         }
 
-        private void MaintainActive()
+        private void ApplyVolumes()
         {
-            for (int a = 0; a < this.activeCount; a++)
+            float t = SmoothSpeed * Time.deltaTime;
+            if (t > 1f)
             {
-                Sustainer sustainer = this.sustainers[a];
+                t = 1f;
+            }
+            for (int c = 1; c < CategoryCount; c++)
+            {
+                if (this.sounds[c] == null)
+                {
+                    continue;
+                }
+                float cur = this.curVol[c];
+                float target = this.targetVol[c];
+                float diff = target - cur;
+                bool changed;
+                if (diff < 0.001f && diff > -0.001f)
+                {
+                    changed = cur != target;
+                    cur = target;
+                }
+                else
+                {
+                    cur += diff * t;
+                    changed = true;
+                }
+                this.curVol[c] = cur;
+                Sustainer sustainer = this.sustainers[c];
+                if (sustainer == null || sustainer.Ended)
+                {
+                    if (cur <= 0f && target <= 0f)
+                    {
+                        continue;
+                    }
+                    sustainer = this.sounds[c].TrySpawnSustainer(SoundInfo.OnCamera(MaintenanceType.None));
+                    this.sustainers[c] = sustainer;
+                    changed = true;
+                }
+                if (sustainer != null && changed)
+                {
+                    sustainer.externalParams["Vol"] = cur;
+                }
+            }
+        }
+
+        private void EndSustainers()
+        {
+            Sustainer[] arr = this.sustainers;
+            if (arr == null)
+            {
+                return;
+            }
+            for (int c = 1; c < CategoryCount; c++)
+            {
+                Sustainer sustainer = arr[c];
                 if (sustainer != null)
                 {
-                    if (sustainer.Ended)
-                    {
-                        this.sustainers[a] = null;
-                    }
-                    else
-                    {
-                        sustainer.Maintain();
-                    }
+                    sustainer.End();
+                    arr[c] = null;
+                    this.curVol[c] = 0f;
                 }
             }
         }
@@ -285,131 +420,85 @@ namespace WaterSFX
             this.built = true;
 
             byte[] table = CategoryTable();
+            byte[] overrides = overrideByTerrain;
             IntVec3 size = this.map.Size;
             this.mapWidth = size.x;
             this.mapHeight = size.z;
             int cellCount = size.x * size.z;
             TerrainGrid grid = this.map.terrainGrid;
 
-            byte[] waterType = new byte[cellCount];
+            byte[] staticType = new byte[cellCount];
             for (int i = 0; i < cellCount; i++)
             {
-                waterType[i] = table[grid.TerrainAt(i).index];
+                staticType[i] = table[grid.TerrainAtIgnoreTemp(i).index];
             }
 
             bool[] visited = new bool[cellCount];
-            SuppressSmallBodies(waterType, visited, (byte)Still, size.x, size.z, MinBodyTiles);
-            SuppressSmallBodies(waterType, visited, (byte)Marsh, size.x, size.z, MinBodyTiles);
+            SuppressSmallBodies(staticType, visited, (byte)Still, size.x, size.z, MinBodyTiles);
+            SuppressSmallBodies(staticType, visited, (byte)Marsh, size.x, size.z, MinBodyTiles);
 
-            byte[][] tempFields = new byte[CategoryCount][];
-            Queue<int>[] frontiers = new Queue<int>[CategoryCount];
-            bool[] present = new bool[CategoryCount];
-            for (int c = 1; c < CategoryCount; c++)
-            {
-                tempFields[c] = new byte[cellCount];
-                frontiers[c] = new Queue<int>();
-            }
-
+            byte[] waterType = new byte[cellCount];
             for (int i = 0; i < cellCount; i++)
             {
-                int cat = waterType[i];
-                if (cat != 0)
-                {
-                    tempFields[cat][i] = Radius;
-                    frontiers[cat].Enqueue(i);
-                    present[cat] = true;
-                }
+                byte ov = overrides[grid.TerrainAt(i).index];
+                waterType[i] = (ov != 0) ? ov : staticType[i];
             }
 
-            int active = 0;
+            this.staticType = staticType;
+            this.waterType = waterType;
+            this.lastProximity = new float[CategoryCount];
+            this.bestDist = new int[CategoryCount];
+            this.targetVol = new float[CategoryCount];
+            this.curVol = new float[CategoryCount];
+            this.sounds = new SoundDef[CategoryCount];
+            this.sustainers = new Sustainer[CategoryCount];
+
             for (int c = 1; c < CategoryCount; c++)
             {
-                if (present[c])
-                {
-                    active++;
-                }
+                this.sounds[c] = DefDatabase<SoundDef>.GetNamed(SoundByCategory[c], true);
             }
 
-            this.fields = new byte[active][];
-            this.lastProximity = new byte[active];
-            this.sounds = new SoundDef[active];
-            this.sustainers = new Sustainer[active];
-
-            int a = 0;
-            for (int c = 1; c < CategoryCount; c++)
-            {
-                if (!present[c])
-                {
-                    continue;
-                }
-                Fill(tempFields[c], frontiers[c], size.x, size.z);
-                this.fields[a] = tempFields[c];
-                this.sounds[a] = DefDatabase<SoundDef>.GetNamed(SoundByCategory[c], true);
-                a++;
-            }
-
-            this.activeCount = active;
-            this.ready = active > 0;
+            this.ready = true;
+            this.map.events.TerrainChanged += this.OnTerrainChanged;
+            this.subscribed = true;
         }
 
-        private static void Fill(byte[] field, Queue<int> frontier, int width, int height)
+        private void OnTerrainChanged(IntVec3 cell)
         {
-            while (frontier.Count > 0)
+            if (!this.ready)
             {
-                int i = frontier.Dequeue();
-                byte cur = field[i];
-                if (cur <= 1)
-                {
-                    continue;
-                }
-                byte next = (byte)(cur - 1);
-                int x = i % width;
-                int z = i / width;
-                bool left = x > 0;
-                bool right = x < width - 1;
-                bool down = z > 0;
-                bool up = z < height - 1;
-                if (left)
-                {
-                    Step(field, frontier, i - 1, next);
-                }
-                if (right)
-                {
-                    Step(field, frontier, i + 1, next);
-                }
-                if (down)
-                {
-                    Step(field, frontier, i - width, next);
-                }
-                if (up)
-                {
-                    Step(field, frontier, i + width, next);
-                }
-                if (left && down)
-                {
-                    Step(field, frontier, i - width - 1, next);
-                }
-                if (left && up)
-                {
-                    Step(field, frontier, i + width - 1, next);
-                }
-                if (right && down)
-                {
-                    Step(field, frontier, i - width + 1, next);
-                }
-                if (right && up)
-                {
-                    Step(field, frontier, i + width + 1, next);
-                }
+                return;
             }
-        }
-
-        private static void Step(byte[] field, Queue<int> frontier, int n, byte value)
-        {
-            if (field[n] < value)
+            int i = cell.z * this.mapWidth + cell.x;
+            byte ov = overrideByTerrain[this.map.terrainGrid.TerrainAt(i).index];
+            byte cat = (ov != 0) ? ov : this.staticType[i];
+            byte old = this.waterType[i];
+            if (cat != old)
             {
-                field[n] = value;
-                frontier.Enqueue(n);
+                this.waterType[i] = cat;
+            }
+            if (cat == 0 && old == 0)
+            {
+                return;
+            }
+            if (!this.haveLast)
+            {
+                this.scanDirty = true;
+                return;
+            }
+            int dx = cell.x - this.lastX;
+            if (dx < 0)
+            {
+                dx = -dx;
+            }
+            int dz = cell.z - this.lastZ;
+            if (dz < 0)
+            {
+                dz = -dz;
+            }
+            if (dx <= Radius && dz <= Radius)
+            {
+                this.scanDirty = true;
             }
         }
 
@@ -497,12 +586,23 @@ namespace WaterSFX
             }
 
             byte[] table = new byte[65536];
+            byte[] overrides = new byte[65536];
             List<TerrainDef> defs = DefDatabase<TerrainDef>.AllDefsListForReading;
             for (int i = 0; i < defs.Count; i++)
             {
                 TerrainDef def = defs[i];
                 byte value;
-                if (HasToken(def.defName, "marsh"))
+                if (def.IsFlood)
+                {
+                    value = River;
+                    overrides[def.index] = River;
+                }
+                else if (HasToken(def.defName, "lava") && !HasToken(def.defName, "cooled"))
+                {
+                    value = Lava;
+                    overrides[def.index] = Lava;
+                }
+                else if (HasToken(def.defName, "marsh"))
                 {
                     value = Marsh;
                 }
@@ -525,6 +625,7 @@ namespace WaterSFX
                 table[def.index] = value;
             }
 
+            overrideByTerrain = overrides;
             categoryByTerrain = table;
             return table;
         }
