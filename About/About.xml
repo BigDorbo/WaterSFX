@@ -3,7 +3,7 @@
   <packageId>dorbo.watersfx</packageId>
   <name>Peepo Presents: LiquidSFX</name>
   <author>Big Dorbo</author>
-  <description>Adds sound to rivers, coasts, still bodies of water, and marshes.</description>
+  <description>Adds sound to rivers, coasts, still bodies of water, lava and marshes.</description>
   
   <supportedVersions>
     <li>1.6</li>

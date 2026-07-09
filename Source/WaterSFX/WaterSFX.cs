@@ -591,6 +591,10 @@ namespace WaterSFX
             for (int i = 0; i < defs.Count; i++)
             {
                 TerrainDef def = defs[i];
+                if (def.defName == "MarshyTerrain")
+                {
+                    continue;
+                }
                 byte value;
                 if (def.IsFlood)
                 {
